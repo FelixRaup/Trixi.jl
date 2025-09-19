@@ -1,0 +1,292 @@
+
+using OrdinaryDiffEq
+using Trixi
+
+# define new structs inside a module to allow re-evaluating the file
+# This is done to create a refinement indicator that keeps the solution refined at the
+# immersed boundary
+module TrixiExtension
+
+using Trixi
+#using StaticArrays
+
+struct VerticalIndicator{RealT <: Real, IndicatorCache}
+    center::Array{RealT, 1}
+    radius::RealT
+    cache::IndicatorCache
+end
+
+function VerticalIndicator(center, radius)
+    cache = create_horizontal_cache(typeof(radius))
+    return VerticalIndicator(center, radius, cache)
+end
+
+function create_horizontal_cache(RealT)
+    alpha = Vector{RealT}()
+    cache = (; alpha)
+    return cache
+end
+
+function get_element_variables!(element_variables, indicator::VerticalIndicator, amr_callback)
+    element_variables[:indicator_amr] = indicator.cache.alpha
+end
+
+# Refine the elements inside the moon and the transition zones between the plasma torus, the low-density zone, and the Jovian ionosphere
+function (vertical_indicator::VerticalIndicator)(
+    u::AbstractArray, mesh, equations, dg::DGSEM, cache; kwargs...)
+
+    @unpack alpha = vertical_indicator.cache
+    @unpack radius, center = vertical_indicator
+    @unpack node_coordinates = cache.elements
+    resize!(alpha, nelements(dg, cache))
+
+    Trixi.@threaded for element in eachelement(dg, cache)
+        alpha[element] = 0.0
+        for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
+            x = Trixi.get_node_coords(node_coordinates, equations, dg, i, j, k, element)
+
+            # Moon surroundings and Galileo trajectory
+            distance = sqrt(x[2]^2 + x[3]^2)
+            if distance < radius && -7.5 < x[1] < 7
+                alpha[element] = 1.0
+            end
+
+
+        end
+    end
+
+    return alpha
+end
+
+end # module TrixiExtension
+
+import .TrixiExtension
+
+
+###############################################################################
+# semidiscretization of the compressible ideal GLM-MHD equations
+
+equations = IdealGlmMhdMultiIonEquations3D(gammas = (5/3, 1.29),
+                                           charge_to_mass = (112.881325104939, 25.7781872234837),
+                                           gas_constants = (1.0, 0.296875), # [nondimensional]
+                                           molar_masses = (19, 64), # [nondimensional]
+                                           ion_ion_collision_constants = [0.0 1.51108336025336E-07;
+                                                                          1.51108336025336E-07 0.0], # [nondimensional] (computed with eq (4.142) of Schunk & Nagy (2009))
+                                                                          )
+
+
+
+function initial_condition_io_nondimensional(x, t, equations::IdealGlmMhdMultiIonEquations3D)
+
+    r = sqrt(x[3] ^ 2 + x[2] ^ 2)
+    z_abs = abs(x[3])
+
+    rho_torus = 1.0
+
+    B1 = B2 = 0.0
+    B3 = -3.604
+    v2_torus = v3_torus = 0.0
+    p_torus = 0.148984037940128
+    psi = 0.0
+
+    r_sphere = sqrt(sum(x .* x))
+    if r_sphere >= 3.0
+         v1_torus = 1.0
+    elseif r_sphere >=1.0
+        smooth_step = 3.0 * (0.5 * (r_sphere - 1.0))^2 - 2.0 * (0.5 * (r_sphere - 1.0))^3
+        v1_torus = smooth_step
+        rho_torus = smooth_step * (rho_torus - 1.e-3) + 1.e-3
+        #p_torus = p_torus * rho_torus
+    else
+        v1_torus = 0.0
+        rho_torus = 1.e-3
+        #p_torus = p_torus * rho_torus
+    end
+
+    # SO2+ ions (depletion)
+    v1 = v1_torus 
+    v2 = v3 = 0.0
+    rho_SO2 = 1.e-3
+    p_SO2 = 4.42296362634754E-05 #100% of the torus' temperature
+    
+    prim = SVector(B1, B2, B3, rho_torus, v1_torus, v2_torus, v3_torus, p_torus, rho_SO2, v1, v2, v3, p_SO2, psi)
+
+    return prim2cons(prim, equations)
+end
+
+
+
+
+function source_terms_io_nondimensional(u, x, t, equations::IdealGlmMhdMultiIonEquations3D)
+    omega_in = 127.719
+    r = sqrt(sum(x .* x))
+    d = 150/1820
+    if r <= 1.0
+        omega = omega_in
+    else
+        omega = omega_in * exp((1.0 - r) / d)
+    end
+
+    s_io = SVector(0.0, 0.0, 0.0, 0.0, -omega * u[2], -omega * u[3], -omega * u[4], -omega * (u[5] - 0.5 * (u[6]^2 + u[7]^2 + u[8]^2 + u[9]^2)), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    s_lorentz = source_terms_lorentz(u, x, t, equations)
+
+    return s_io + s_lorentz
+end
+
+
+
+
+
+initial_condition = initial_condition_io_nondimensional
+
+initial_condition = initial_condition_io_nondimensional
+
+surface_flux=(FluxPlusDissipation(flux_ruedaramirez_etal,
+                                                          DissipationLaxFriedrichsEntropyVariables()), flux_nonconservative_ruedaramirez_etal)
+volume_flux = (flux_ruedaramirez_etal, flux_nonconservative_ruedaramirez_etal)
+polydeg = 4
+basis = LobattoLegendreBasis(polydeg)
+indicator_sc = IndicatorHennemannGassner(equations, basis,
+                                         alpha_max = 0.5,
+                                         alpha_min = 0.001,
+                                         alpha_smooth = true,
+                                         variable = density_pressure)
+volume_integral = VolumeIntegralShockCapturingHG(indicator_sc;
+                                                 volume_flux_dg = volume_flux,
+                                                 volume_flux_fv = surface_flux)
+
+solver = DGSEM(polydeg = polydeg, surface_flux = surface_flux,
+               volume_integral = volume_integral)
+
+
+coordinates_min = (-20.0, -20.0, -50.0)
+coordinates_max = (60.0, 20.0, 50.0)
+
+trees_per_dimension = (8, 4, 10)
+mesh = P4estMesh(trees_per_dimension,
+                 polydeg = 1,
+                 coordinates_min = coordinates_min,
+                 coordinates_max = coordinates_max,
+                 initial_refinement_level = 0,
+                 periodicity = true)
+    
+# create the semi discretization object
+semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver, 
+                                    source_terms = source_terms_io_nondimensional,
+                                    )
+
+###############################################################################
+# ODE solvers, callbacks etc.
+
+@inline function density1(u, equations::IdealGlmMhdMultiIonEquations3D)
+    u_loc = Trixi.get_component(1, u, equations)
+    return u_loc[1]
+end
+
+@inline function density2(u, equations::IdealGlmMhdMultiIonEquations3D)
+    u_loc = Trixi.get_component(2, u, equations)
+    return u_loc[1]
+end
+
+@inline function pressure1(u, equations::IdealGlmMhdMultiIonEquations3D)
+    pres = pressure(u, equations)
+    return pres[1]
+end
+
+@inline function pressure2(u, equations::IdealGlmMhdMultiIonEquations3D)
+    pres = pressure(u, equations)
+    return pres[2]
+end
+
+# positivity limiter necessary for this tough example
+stage_limiter! = PositivityPreservingLimiterZhangShu(thresholds = (5.0e-6, 5.0e-6, 5.0e-6, 5.0e-6),
+                                                     variables = (density1, density2, pressure1, pressure2))
+
+tspan = (0.0, 0.01) #0.06) #
+ode = semidiscretize(semi, tspan)
+
+summary_callback = SummaryCallback()
+
+analysis_interval = 100
+analysis_callback = AnalysisCallback(semi, interval = analysis_interval,
+                                     save_analysis = true,
+			             output_directory=joinpath(@__DIR__,"out"))
+
+alive_callback = AliveCallback(analysis_interval = analysis_interval)
+
+function hydro_energy1(u, equations::IdealGlmMhdMultiIonEquations3D)
+    B1, B2, B3 = magnetic_field(u, equations)
+    psi = divergence_cleaning_field(u, equations)
+    return u[8] - 0.5 * (B1^2 + B2^2 + B3^2 + psi^2)
+end
+
+amr_indicator = IndicatorLöhner(semi,
+                                variable = hydro_energy1)
+
+# An indicator that refines where the moon is
+amr_indicator_moon = TrixiExtension.VerticalIndicator([0.0, 0.0, 0.0], 1.0)  #IndicatorImmersedBoundary(semi)
+
+amr_controller = ControllerThreeLevelCombined(semi, amr_indicator, amr_indicator_moon,
+                                                base_level = 0,
+                                                med_level = 4, med_threshold=0.2, #3
+                                                max_level = 5, max_threshold = 0.3, #4
+                                                max_threshold_secondary = 0.1)
+
+
+
+amr_callback = AMRCallback(semi, amr_controller,
+                        interval = 5,
+                        adapt_initial_condition = true,
+                        adapt_initial_condition_only_refine = true,
+                        limiter! = stage_limiter!
+                        )
+
+# cfl = 0.1
+
+function cflf(t)
+    if t > 4
+        return 0.61
+    else
+        return 0.01 + 0.6 * (3.0 * (0.25 * t)^2 - 2.0 * (0.25 * t)^3) 
+    end
+end
+
+stepsize_callback = StepsizeCallback(cfl = cflf)
+
+
+save_solution = SaveSolutionCallback(dt = 0.1, #interval = 1, #dt = 0.01, #interval = 1, #
+                                     save_initial_solution=true,
+                                     save_final_solution=true,
+			                         output_directory=joinpath(@__DIR__,"out"),
+                                     solution_variables=cons2prim)
+
+# The SaveRestartCallback allows to save a file from which a Trixi.jl simulation can be restarted
+save_restart = SaveRestartCallback(interval = 500,
+                                   output_directory=joinpath(@__DIR__,"out"),
+                                   save_final_restart = true)
+
+glm_speed_callback = GlmSpeedCallback(glm_scale = 1.0, cfl = cflf) # 
+
+callbacks = CallbackSet(summary_callback,
+                        analysis_callback,
+                        alive_callback,
+                        amr_callback,
+                        stepsize_callback,
+                        save_solution,
+                        glm_speed_callback,
+                        save_restart)
+
+
+###############################################################################
+# run the simulation
+# sol = solve(ode, SSPRK43(stage_limiter!);
+#             dt = 1.0e-7,
+#             ode_default_options()..., callback = callbacks);
+
+sol = solve(ode, SSPRK33(stage_limiter!);
+            dt = 1.0e-7,
+            ode_default_options()..., 
+            callback = callbacks);
+
+summary_callback() # print the timer summary

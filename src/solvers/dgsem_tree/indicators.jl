@@ -137,6 +137,101 @@ function (indicator_hg::IndicatorHennemannGassner)(u, mesh, equations, dg::DGSEM
     return alpha
 end
 
+
+
+# Create new indicator for two variables
+
+struct IndicatorHennemannGassnerTwoVar{RealT <: Real, Var1, Var2, Cache} <: AbstractIndicator
+    alpha_max::RealT
+    alpha_min::RealT
+    alpha_smooth::Bool
+    variable1::Var1
+    variable2::Var2
+    cache::Cache
+end
+
+# constructor for SC
+function IndicatorHennemannGassnerTwoVar(equations::AbstractEquations, basis;
+                                         alpha_max = 0.5,
+                                         alpha_min = 0.001,
+                                         alpha_smooth = true,
+                                         variable1,
+                                         variable2)
+    alpha_max, alpha_min = promote(alpha_max, alpha_min)
+    cache = create_cache(IndicatorHennemannGassner, equations, basis)
+    IndicatorHennemannGassnerTwoVar{typeof(alpha_max), typeof(variable1),
+                                    typeof(variable2), typeof(cache)}(alpha_max,
+                                                                      alpha_min,
+                                                                      alpha_smooth,
+                                                                      variable1,
+                                                                      variable2,
+                                                                      cache)
+end
+
+# constructor for AMR
+function IndicatorHennemannGassnerTwoVar(semi::AbstractSemidiscretization;
+                                         alpha_max = 0.5,
+                                         alpha_min = 0.001,
+                                         alpha_smooth = true,
+                                         variable1,
+                                         variable2)
+    alpha_max, alpha_min = promote(alpha_max, alpha_min)
+    cache = create_cache(IndicatorHennemannGassner, semi)
+    IndicatorHennemannGassnerTwoVar{typeof(alpha_max), typeof(variable1),
+                                    typeof(variable2), typeof(cache)}(alpha_max,
+                                                                      alpha_min,
+                                                                      alpha_smooth,
+                                                                      variable1,
+                                                                      variable2,
+                                                                      cache)
+end
+
+function Base.show(io::IO, ind::IndicatorHennemannGassnerTwoVar)
+    @nospecialize ind
+    print(io, "IndicatorHennemannGassnerTwoVar(")
+    print(io, ind.variable1, ", ", ind.variable2)
+    print(io, ", alpha_max=", ind.alpha_max)
+    print(io, ", alpha_min=", ind.alpha_min)
+    print(io, ", alpha_smooth=", ind.alpha_smooth)
+    print(io, ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", ind::IndicatorHennemannGassnerTwoVar)
+    @nospecialize ind
+    setup = [
+        "indicator variables" => "$(ind.variable1), $(ind.variable2)",
+        "max. α" => ind.alpha_max,
+        "min. α" => ind.alpha_min,
+        "smooth α" => (ind.alpha_smooth ? "yes" : "no")
+    ]
+    summary_box(io, "IndicatorHennemannGassnerTwoVar", setup)
+end
+
+function (ind::IndicatorHennemannGassnerTwoVar)(u, mesh, equations, dg::DGSEM, cache; kwargs...)
+    # Compute alpha for first variable
+    ind1 = IndicatorHennemannGassner(equations, dg.basis;
+                                     alpha_max = ind.alpha_max,
+                                     alpha_min = ind.alpha_min,
+                                     alpha_smooth = ind.alpha_smooth,
+                                     variable = ind.variable1)
+    α1 = ind1(u, mesh, equations, dg, cache; kwargs...)
+
+    # Compute alpha for second variable
+    ind2 = IndicatorHennemannGassner(equations, dg.basis;
+                                     alpha_max = ind.alpha_max,
+                                     alpha_min = ind.alpha_min,
+                                     alpha_smooth = ind.alpha_smooth,
+                                     variable = ind.variable2)
+    α2 = ind2(u, mesh, equations, dg, cache; kwargs...)
+
+    # Return max alpha
+    @. α1 = max(α1, α2)
+
+    return α1
+end
+
+
+
 """
     IndicatorLöhner (equivalent to IndicatorLoehner)
 

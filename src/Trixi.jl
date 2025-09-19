@@ -144,6 +144,7 @@ include("semidiscretization/semidiscretization_hyperbolic.jl")
 include("semidiscretization/semidiscretization_hyperbolic_parabolic.jl")
 include("semidiscretization/semidiscretization_euler_acoustics.jl")
 include("semidiscretization/semidiscretization_coupled.jl")
+include("semidiscretization/semidiscretization_split.jl")
 include("time_integration/time_integration.jl")
 include("callbacks_step/callbacks_step.jl")
 include("callbacks_stage/callbacks_stage.jl")
@@ -239,7 +240,7 @@ export initial_condition_eoc_test_coupled_euler_gravity,
 
 export cons2cons, cons2prim, prim2cons, cons2macroscopic, cons2state, cons2mean,
        cons2entropy, entropy2cons
-export density, pressure, density_pressure, velocity, global_mean_vars,
+export density, pressure, density_pressure, density_pressure_one_species, velocity, global_mean_vars,
        equilibrium_distribution, waterheight, waterheight_pressure
 export entropy, energy_total, energy_kinetic, energy_internal,
        energy_magnetic, cross_helicity, magnetic_field, divergence_cleaning_field,
@@ -256,7 +257,7 @@ export DG,
        VolumeIntegralWeakForm, VolumeIntegralStrongForm,
        VolumeIntegralFluxDifferencing,
        VolumeIntegralPureLGLFiniteVolume,
-       VolumeIntegralShockCapturingHG, IndicatorHennemannGassner,
+       VolumeIntegralShockCapturingHG, IndicatorHennemannGassner, IndicatorHennemannGassnerTwoVar,
        VolumeIntegralUpwind,
        SurfaceIntegralWeakForm, SurfaceIntegralStrongForm,
        SurfaceIntegralUpwind,
@@ -272,6 +273,8 @@ export nelements, nnodes, nvariables,
 export SemidiscretizationHyperbolic, semidiscretize, compute_coefficients, integrate
 
 export SemidiscretizationHyperbolicParabolic
+
+export SemidiscretizationHyperbolicSplit
 
 export SemidiscretizationEulerAcoustics
 

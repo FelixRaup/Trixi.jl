@@ -80,26 +80,54 @@ function (glm_speed_callback::GlmSpeedCallback)(u, t, integrator)
     return true
 end
 
-function update_cleaning_speed!(semi, glm_speed_callback, dt, t)
-    @unpack glm_scale, cfl = glm_speed_callback
+function update_cleaning_speed!(semi::SemidiscretizationHyperbolic, glm_speed_callback, dt, t)
+   @unpack glm_scale, cfl = glm_speed_callback
 
-    mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
+   mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
 
-    # compute time step for GLM linear advection equation with c_h=1 (redone due to the possible AMR)
-    if cfl isa Real # Case for constant CFL
-        c_h_deltat = calc_dt_for_cleaning_speed(cfl, mesh, equations, solver, cache)
-    else # Variable CFL
-        c_h_deltat = calc_dt_for_cleaning_speed(cfl(t), mesh, equations, solver, cache)
-    end
+   # compute time step for GLM linear advection equation with c_h=1 (redone due to the possible AMR)
+   if cfl isa Real # Case for constant CFL
+       c_h_deltat = calc_dt_for_cleaning_speed(cfl, mesh, equations, solver, cache)
+   else # Variable CFL
+       c_h_deltat = calc_dt_for_cleaning_speed(cfl(t), mesh, equations, solver, cache)
+   end
 
-    # c_h is proportional to its own time step divided by the complete MHD time step
-    # We use @reset here since the equations are immutable (to work on GPUs etc.).
-    # Thus, we need to modify the equations field of the semidiscretization.
-    @reset equations.c_h = glm_scale * c_h_deltat / dt
-    semi.equations = equations
+   # c_h is proportional to its own time step divided by the complete MHD time step
+   # We use @reset here since the equations are immutable (to work on GPUs etc.).
+   # Thus, we need to modify the equations field of the semidiscretization.
+   @reset equations.c_h = glm_scale * c_h_deltat / dt
+   semi.equations = equations
 
-    return semi
+   return semi
 end
+
+function update_cleaning_speed!(semi::SemidiscretizationHyperbolicSplit, glm_speed_callback, dt, t)
+   @unpack glm_scale, cfl = glm_speed_callback
+
+   # Extract relevant fields
+   mesh = semi.mesh
+   eq2 = semi.equations2
+   solver = semi.solver2
+   cache = semi.cache2
+
+   # Compute time step for GLM linear advection equation with c_h=1
+   c_h_deltat = if cfl isa Real
+       calc_dt_for_cleaning_speed(cfl, mesh, eq2, solver, cache)
+   else
+       calc_dt_for_cleaning_speed(cfl(t), mesh, eq2, solver, cache)
+   end
+
+   # Update cleaning speed in-place
+   eq2.c_h = glm_scale * c_h_deltat / dt
+
+   semi.equations2 = eq2
+
+   return semi  # semi itself is unchanged; eq1 field is mutated
+end
+
+
+
+
 
 # This method is called as callback after the StepsizeCallback during the time integration.
 @inline function (glm_speed_callback::GlmSpeedCallback)(integrator)
